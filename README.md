@@ -8,13 +8,16 @@ Beamweave and whatever comes next. Written in Rust (egui), for macOS, Windows an
 - A running app is never replaced (a show may be going on).
 - Stagehand updates itself from `Cheter0410/stagehand-releases`.
 
-Where apps go:
+Stagehand only downloads the finished release files (no source, no Git). All apps go into one folder:
 
 | System  | Release file                    | Installed to                                     |
 |---------|---------------------------------|--------------------------------------------------|
-| macOS   | `.dmg`                          | `/Applications` (or `~/Applications`)            |
-| Windows | `…-Setup-x.y.z.exe` (Inno)      | where the installer puts it (silent, per user)   |
-| Linux   | `…-linux-x86_64.tar.gz`         | `~/.local/share/stagehand/apps`, menu entry, `~/.local/bin` |
+| macOS   | `.dmg`                          | `/Applications/Stagehand/` (or `~/Applications/Stagehand/`) |
+| Windows | `…-Setup-x.y.z.exe` (Inno)      | `%LOCALAPPDATA%\Programs\Stagehand\<App>` (silent, per user; Stagehand itself in `…\Stagehand`) |
+| Linux   | `…-linux-x86_64.tar.gz`         | `~/.local/share/stagehand/apps/<app>`, menu entry, `~/.local/bin` |
+
+Copies in the old places (`/Applications/ShowMaster.app`, `…\Programs\Show Master`) are moved into the
+folder with the next install or update.
 
 On Linux an app installed by the system (e.g. the Arch package of Show Master) is found on `PATH`.
 

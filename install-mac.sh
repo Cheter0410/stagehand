@@ -47,25 +47,28 @@ DMG="dist/Stagehand-$V.dmg"
 ui_section "Installieren"
 [ -n "${NO_INSTALL:-}" ] && { ui_ok "Installer: $DMG"; ui_done; exit 0; }
 STAMP=dist/.made/installed-app
+# All show tools share one folder (as Stagehand installs them).
+APPDIR=/Applications/Stagehand
 WANT=$(cat "dist/.made/$(basename "$DMG")" 2>/dev/null || echo none)
-if [ -d /Applications/Stagehand.app ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$WANT" ]; then
-  ui_skip "In /Applications" "Stagehand $V ist schon installiert"
+if [ -d "$APPDIR/Stagehand.app" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$WANT" ]; then
+  ui_skip "In Programme/Stagehand" "Stagehand $V ist schon installiert"
 else
   put() {
     pkill -x stagehand 2>/dev/null || true
     MNT=$(mktemp -d)
     hdiutil attach -nobrowse -readonly -mountpoint "$MNT" "$DMG" >/dev/null
-    rm -rf /Applications/Stagehand.app
-    ditto "$MNT/Stagehand.app" /Applications/Stagehand.app
+    mkdir -p "$APPDIR"
+    rm -rf "$APPDIR/Stagehand.app" "/Applications/Stagehand.app"
+    ditto "$MNT/Stagehand.app" "$APPDIR/Stagehand.app"
     hdiutil detach "$MNT" -quiet >/dev/null 2>&1 || true
     rmdir "$MNT" 2>/dev/null || true
-    xattr -dr com.apple.quarantine /Applications/Stagehand.app 2>/dev/null || true
+    xattr -dr com.apple.quarantine "$APPDIR/Stagehand.app" 2>/dev/null || true
   }
-  ui_run "In /Applications" put
+  ui_run "In Programme/Stagehand" put
   printf '%s' "$WANT" > "$STAMP"
 fi
 
 ui_section "Fertig"
-ui_ok "Stagehand ist in Programme (Launchpad, Spotlight)"
+ui_ok "Stagehand ist in Programme › Stagehand (Launchpad, Spotlight)"
 ui_done
-open /Applications/Stagehand.app
+open "$APPDIR/Stagehand.app"

@@ -1,10 +1,16 @@
 //! What differs per operating system: which release file fits, where an app
 //! is installed (and which version), installing it and starting it.
 //!
-//! * macOS: the `.dmg`; the app goes to /Applications (or ~/Applications when
-//!   /Applications is not writable). Version from the bundle's Info.plist.
-//! * Windows: the Inno Setup installer, run silently for the current user.
-//!   Version and folder from the installer's uninstall entry in the registry.
+//! All apps go into one folder per system, next to Stagehand itself:
+//!
+//! * macOS: the `.dmg`; the app goes to /Applications/Stagehand (or
+//!   ~/Applications/Stagehand when /Applications is not writable). Version
+//!   from the bundle's Info.plist. A copy found in the old place
+//!   (/Applications) is moved there with the next install or update.
+//! * Windows: the Inno Setup installer, run silently for the current user,
+//!   into %LOCALAPPDATA%\Programs\Stagehand\<App>. Version and folder from the
+//!   installer's uninstall entry in the registry; an older install elsewhere
+//!   is removed after the new one is in place.
 //! * Linux: the portable `.tar.gz`, unpacked to ~/.local/share/stagehand/apps
 //!   with a menu entry and a link in ~/.local/bin. An app installed by the
 //!   system (e.g. the Arch package) is found on PATH and started too.
@@ -62,13 +68,46 @@ fn output(cmd: &mut Command) -> Option<String> {
 // macOS
 // --------------------------------------------------------------------------
 
+/// The folder all apps share (macOS: inside Applications).
+pub const FOLDER: &str = "Stagehand";
+
+/// Where an app bundle may be: the shared folder first, then the old places.
 #[cfg(target_os = "macos")]
 fn mac_locations(bundle: &str) -> Vec<PathBuf> {
-    let mut v = vec![Path::new("/Applications").join(bundle)];
+    let mut v = vec![Path::new("/Applications").join(FOLDER).join(bundle)];
+    if let Some(h) = dirs::home_dir() {
+        v.push(h.join("Applications").join(FOLDER).join(bundle));
+    }
+    v.push(Path::new("/Applications").join(bundle));
     if let Some(h) = dirs::home_dir() {
         v.push(h.join("Applications").join(bundle));
     }
     v
+}
+
+/// Windows: the folder an app is installed to, e.g.
+/// `C:\Users\me\AppData\Local\Programs\Stagehand\Show Master`.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn windows_app_dir(local_app_data: &Path, app_name: &str) -> PathBuf {
+    local_app_data.join("Programs").join(FOLDER).join(app_name)
+}
+
+/// Whether `old` is an install folder that can go: it holds the program and
+/// the uninstaller and is not (inside) the new one.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn old_install_removable(old: &Path, new: &Path, exe: &str) -> bool {
+    let norm = |p: &Path| {
+        p.to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .to_lowercase()
+            .replace('/', "\\")
+    };
+    let (o, n) = (norm(old), norm(new));
+    !o.is_empty()
+        && o != n
+        && !n.starts_with(&format!("{o}\\"))
+        && old.join(exe).exists()
+        && old.join("unins000.exe").exists()
 }
 
 /// `CFBundleShortVersionString` of an app bundle.
@@ -279,22 +318,35 @@ pub fn install_files(app: &AppDef, file: &Path, version: &str) -> Result<(), Str
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = (app, version);
-        let st = Command::new(file)
-            .args([
-                "/VERYSILENT",
-                "/SUPPRESSMSGBOXES",
-                "/NORESTART",
-                "/CURRENTUSER",
-                "/NOCANCEL",
-            ])
+        let _ = version;
+        let w = app.windows.as_ref().ok_or("not available for Windows")?;
+        let before = inno_entry(&w.inno_app_id).map(|(_, dir)| dir);
+        let mut cmd = Command::new(file);
+        cmd.args([
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/CURRENTUSER",
+            "/NOCANCEL",
+        ]);
+        let target = std::env::var_os("LOCALAPPDATA")
+            .map(|d| windows_app_dir(Path::new(&d), &app.name));
+        if let Some(t) = &target {
+            cmd.arg(format!("/DIR={}", t.display()));
+        }
+        let st = cmd
             .status()
             .map_err(|e| format!("Could not run the installer: {e}"))?;
-        if st.success() {
-            Ok(())
-        } else {
-            Err(format!("The installer failed ({st})."))
+        if !st.success() {
+            return Err(format!("The installer failed ({st})."));
         }
+        // Moved from an older place: the old folder is left over.
+        if let (Some(old), Some((_, now))) = (before, inno_entry(&w.inno_app_id)) {
+            if old_install_removable(&old, &now, &w.exe) {
+                let _ = std::fs::remove_dir_all(&old);
+            }
+        }
+        Ok(())
     }
     #[cfg(target_os = "linux")]
     {
@@ -326,12 +378,15 @@ fn install_dmg(dmg: &Path, bundle: &str) -> Result<(), String> {
         if !src.exists() {
             return Err(format!("{bundle} is not in the disk image."));
         }
-        let dest_dir = if writable(Path::new("/Applications")) {
-            PathBuf::from("/Applications")
+        let shared = Path::new("/Applications").join(FOLDER);
+        let _ = std::fs::create_dir_all(&shared);
+        let dest_dir = if writable(&shared) {
+            shared
         } else {
             let d = dirs::home_dir()
                 .ok_or("no home folder")?
-                .join("Applications");
+                .join("Applications")
+                .join(FOLDER);
             std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
             d
         };
@@ -353,6 +408,12 @@ fn install_dmg(dmg: &Path, bundle: &str) -> Result<(), String> {
             .args(["-dr", "com.apple.quarantine"])
             .arg(&dest)
             .status();
+        // Copies in the old places would be found first by Spotlight and the Dock.
+        for old in mac_locations(bundle) {
+            if old != dest && old.join("Contents/Info.plist").exists() {
+                let _ = std::fs::remove_dir_all(&old);
+            }
+        }
         Ok(())
     })();
     let _ = Command::new("hdiutil")
@@ -445,6 +506,25 @@ mod tests {
             Some("C:\\Users\\a b\\AppData\\Local\\Programs\\Show Master\\")
         );
         assert_eq!(reg_value(out, "Publisher"), None);
+    }
+
+    #[test]
+    fn windows_folders() {
+        let base = Path::new(r"C:\Users\a\AppData\Local");
+        let d = windows_app_dir(base, "Show Master");
+        assert!(d.ends_with("Stagehand/Show Master") || d.to_string_lossy().ends_with(r"Stagehand\Show Master"));
+        // Not removable: missing files, same folder, or the new one inside it.
+        let tmp = std::env::temp_dir().join(format!("sh-old-{}", std::process::id()));
+        let old = tmp.join("Show Master");
+        std::fs::create_dir_all(&old).unwrap();
+        let new = tmp.join("Stagehand").join("Show Master");
+        assert!(!old_install_removable(&old, &new, "showmaster.exe"));
+        std::fs::write(old.join("showmaster.exe"), b"").unwrap();
+        std::fs::write(old.join("unins000.exe"), b"").unwrap();
+        assert!(old_install_removable(&old, &new, "showmaster.exe"));
+        assert!(!old_install_removable(&old, &old, "showmaster.exe"));
+        assert!(!old_install_removable(&tmp, &new, "showmaster.exe"));
+        let _ = std::fs::remove_dir_all(tmp);
     }
 
     #[test]
