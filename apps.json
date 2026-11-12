@@ -53,6 +53,35 @@
         "folder": "beamweave",
         "release": "scripts/release.sh"
       }
+    },
+    {
+      "id": "lantern",
+      "name": "Lantern",
+      "tagline": "Presentation playback for live shows: PowerPoint, GO or timecode, display and NDI.",
+      "color": "#ffc45c",
+      "releases": "Cheter0410/lantern-releases",
+      "icon_url": "https://raw.githubusercontent.com/Cheter0410/stagehand-releases/main/icons/lantern.png",
+      "macos": {
+        "asset_suffix": ".dmg",
+        "app": "Lantern.app"
+      },
+      "windows": {
+        "asset_prefix": "Lantern-Setup-",
+        "asset_suffix": ".exe",
+        "inno_app_id": "{A2BCE3F2-3BF9-4B20-9EC2-2A090D82C5B7}",
+        "exe": "lantern.exe"
+      },
+      "linux": {
+        "asset_suffix": "-linux-x86_64.tar.gz",
+        "bin": "lantern"
+      },
+      "dev": {
+        "repo": "Cheter0410/lantern",
+        "folder": "lantern",
+        "release": "./release.sh",
+        "install_macos": "bash install-mac.sh",
+        "install_linux": "./install.sh"
+      }
     }
   ]
 }

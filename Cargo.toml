@@ -3,7 +3,7 @@ name = "stagehand"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-description = "Installs, updates and starts the show tools (Show Master, Beamweave, ...)"
+description = "Installs, updates and starts the show tools (Show Master, Beamweave, Lantern, ...)"
 authors = ["Cheter"]
 publish = false
 
