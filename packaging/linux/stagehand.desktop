@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Stagehand
+Comment=Installs, updates and starts the show tools
+Exec=stagehand
+Icon=stagehand
+Terminal=false
+Categories=Utility;AudioVideo;
