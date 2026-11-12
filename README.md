@@ -37,14 +37,15 @@ Mac (into `~/Desktop/dev/stagehand`):
 
 ## Release
 
-The same one command as in Show Master, on both computers:
+One command, the same on both computers (as in Show Master):
 
     ./release.sh            # Arch PC: Linux + Windows, Mac: the DMG - builds and uploads
     ./release.sh status     # what of the current version is up already
-    ./release.sh version    # raise the version (asks what is new), commit, push
 
-Uploads go into a draft; once Mac, Windows and Linux are all there the release is published
-automatically, and installed copies offer the update. Missing tools (GitHub login, Rust, the Windows
-installer tools on the Arch PC) are set up on first use.
+Version numbers are automatic: if a draft release exists, this computer builds exactly its tagged state
+and replaces its own files in it; if the current version is already published, it is raised by one
+(the commit subjects since become "what's new"), committed, tagged and pushed, and a new draft is made.
+Once Mac, Windows and Linux are in the draft it is published, and installed copies offer the update.
+Missing tools (GitHub login, Rust, the Windows installer tools on the Arch PC) are set up on first use.
 
 The app icon is `assets/icon.svg`; `node scripts/render-icon.mjs` renders the PNG and ICO from it.
