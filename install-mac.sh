@@ -37,9 +37,6 @@ fi
 say "Building Stagehand (takes a few minutes the first time)"
 ./packaging/macos/build-dmg.sh
 DMG=$(ls -t dist/Stagehand-*.dmg | head -n 1)
-if command -v gh >/dev/null 2>&1 || [ -n "${PUBLISH:-}" ]; then
-  ./packaging/publish.sh || true
-fi
 [ -n "${NO_INSTALL:-}" ] && { open dist; say "Done: $DMG"; exit 0; }
 
 say "Installing into /Applications"

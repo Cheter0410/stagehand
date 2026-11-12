@@ -37,11 +37,14 @@ Mac (into `~/Desktop/dev/stagehand`):
 
 ## Release
 
-1. Raise `version` in `Cargo.toml`, add `## x.y.z` to `CHANGELOG.md`, commit, push.
-2. Arch PC: `./packaging/build-on-linux.sh` (Linux + Windows; Windows needs MinGW, Wine and Inno Setup,
-   the same set-up as Show Master's `docs/release-anleitung.md`).
-3. Mac: `bash install-mac.sh`.
+The same one command as in Show Master, on both computers:
 
-Both ask at the end whether to upload to the release (`gh` logged in; `PUBLISH=1` without asking).
+    ./release.sh            # Arch PC: Linux + Windows, Mac: the DMG - builds and uploads
+    ./release.sh status     # what of the current version is up already
+    ./release.sh version    # raise the version (asks what is new), commit, push
+
+Uploads go into a draft; once Mac, Windows and Linux are all there the release is published
+automatically, and installed copies offer the update. Missing tools (GitHub login, Rust, the Windows
+installer tools on the Arch PC) are set up on first use.
 
 The app icon is `assets/icon.svg`; `node scripts/render-icon.mjs` renders the PNG and ICO from it.

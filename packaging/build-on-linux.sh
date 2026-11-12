@@ -3,7 +3,7 @@
 #   dist/stagehand-<v>-linux-x86_64.tar.gz   portable Linux program
 #   dist/Stagehand-Setup-<v>.exe             Windows installer (Inno Setup under Wine)
 # One-time setup (Arch): see README.md. SKIP_WINDOWS=1 skips Windows.
-# At the end it offers to upload the files to the release (packaging/publish.sh).
+# Releases: ./release.sh (builds with this script and uploads).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 V=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
@@ -39,4 +39,3 @@ if [ -z "${SKIP_WINDOWS:-}" ]; then
 fi
 
 ls -la dist
-./packaging/publish.sh
