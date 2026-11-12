@@ -126,6 +126,27 @@ pub struct RepoState {
     pub changes: usize,
     /// Commits on GitHub that are not here yet (as of the last fetch).
     pub behind: usize,
+    /// Commits here that are not on GitHub (lost when the folder is deleted).
+    pub ahead: usize,
+    /// New files git does not track yet (lost when the folder is deleted).
+    pub untracked: usize,
+}
+
+impl RepoState {
+    /// What deleting the checkout would lose, in words; `None` = nothing.
+    pub fn would_lose(&self) -> Option<String> {
+        let mut v = Vec::new();
+        if self.changes > 0 {
+            v.push(format!("{} changed file(s)", self.changes));
+        }
+        if self.untracked > 0 {
+            v.push(format!("{} new file(s)", self.untracked));
+        }
+        if self.ahead > 0 {
+            v.push(format!("{} commit(s) not on GitHub", self.ahead));
+        }
+        (!v.is_empty()).then(|| v.join(", "))
+    }
 }
 
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
@@ -148,11 +169,37 @@ pub fn repo_state(dir: &Path) -> Option<RepoState> {
     let behind = git(dir, &["rev-list", "--count", "HEAD..@{u}"])
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+    // Without an upstream every local commit counts as not on GitHub.
+    let ahead = git(dir, &["rev-list", "--count", "@{u}..HEAD"])
+        .or_else(|| git(dir, &["rev-list", "--count", "HEAD", "--not", "--remotes"]))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let untracked = git(dir, &["ls-files", "--others", "--exclude-standard"])
+        .map(|s| s.lines().count())
+        .unwrap_or(0);
     Some(RepoState {
         branch,
         changes,
         behind,
+        ahead,
+        untracked,
     })
+}
+
+/// Delete a source checkout (the whole folder, build output included).
+/// Only a git checkout is deleted, and never the home folder or one above it.
+pub fn delete_checkout(dir: &Path) -> Result<(), String> {
+    let dir = dir
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
+    if !is_checkout(&dir) {
+        return Err(format!("{} is not a git checkout.", dir.display()));
+    }
+    let home = dirs::home_dir().and_then(|h| h.canonicalize().ok());
+    if dir.parent().is_none() || home.as_ref().is_some_and(|h| h.starts_with(&dir)) {
+        return Err(format!("{} is not deleted (too high up).", dir.display()));
+    }
+    std::fs::remove_dir_all(&dir).map_err(|e| format!("Could not delete {}: {e}", dir.display()))
 }
 
 /// Quote for bash (single quotes).
@@ -292,6 +339,34 @@ pub fn install_command(app: &AppDef) -> Option<String> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deletes_only_checkouts_and_tells_what_is_lost() {
+        let base = std::env::temp_dir().join(format!("sh-del-{}", std::process::id()));
+        let plain = base.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert!(delete_checkout(&plain).is_err());
+        assert!(plain.exists());
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join("target/release")).unwrap();
+        let ok = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .status()
+            .is_ok_and(|s| s.success());
+        if ok {
+            std::fs::write(repo.join("new.txt"), "x").unwrap();
+            let st = repo_state(&repo);
+            // A fresh repository has no branch commit yet: rev-parse may fail.
+            if let Some(st) = st {
+                assert_eq!(st.untracked, 1);
+                assert!(st.would_lose().unwrap().contains("1 new file"));
+            }
+            delete_checkout(&repo).unwrap();
+            assert!(!repo.exists());
+        }
+        let _ = std::fs::remove_dir_all(base);
+    }
 
     #[test]
     fn script_runs_steps_and_summarises() {

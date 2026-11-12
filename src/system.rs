@@ -329,8 +329,8 @@ pub fn install_files(app: &AppDef, file: &Path, version: &str) -> Result<(), Str
             "/CURRENTUSER",
             "/NOCANCEL",
         ]);
-        let target = std::env::var_os("LOCALAPPDATA")
-            .map(|d| windows_app_dir(Path::new(&d), &app.name));
+        let target =
+            std::env::var_os("LOCALAPPDATA").map(|d| windows_app_dir(Path::new(&d), &app.name));
         if let Some(t) = &target {
             cmd.arg(format!("/DIR={}", t.display()));
         }
@@ -492,6 +492,93 @@ fn install_tarball(app: &AppDef, file: &Path, version: &str) -> Result<(), Strin
     Ok(())
 }
 
+// --------------------------------------------------------------------------
+// Uninstall
+// --------------------------------------------------------------------------
+
+/// Whether Stagehand can remove this copy itself (not one the system's
+/// package manager installed).
+pub fn removable(app: &AppDef, inst: &Installed) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::paths::linux_apps_dir().is_some_and(|d| inst.path.starts_with(d.join(&app.id)))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, inst);
+        true
+    }
+}
+
+/// Remove an installed app. Settings and files made with it (shows,
+/// presentations) are not touched.
+pub fn uninstall(app: &AppDef, inst: &Installed) -> Result<(), String> {
+    if is_running(app, inst) {
+        return Err(format!("{} is running. Quit it first.", app.name));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // The .app bundle is the whole program.
+        if inst.path.extension().and_then(|e| e.to_str()) != Some("app") {
+            return Err("Not an app bundle.".into());
+        }
+        std::fs::remove_dir_all(&inst.path)
+            .map_err(|e| format!("Could not remove {}: {e}", inst.path.display()))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // The app's own uninstaller (removes its files, menu entries and the
+        // entry in Windows' app list).
+        let dir = inst.path.parent().ok_or("no install folder")?;
+        let unins = dir.join("unins000.exe");
+        if !unins.exists() {
+            return Err(format!("No uninstaller in {}.", dir.display()));
+        }
+        let st = Command::new(&unins)
+            .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+            .status()
+            .map_err(|e| format!("Could not run the uninstaller: {e}"))?;
+        if st.success() {
+            Ok(())
+        } else {
+            Err(format!("The uninstaller failed ({st})."))
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if !removable(app, inst) {
+            return Err(format!(
+                "{} was installed by the system ({}): remove it with the package manager.",
+                app.name,
+                inst.path.display()
+            ));
+        }
+        let l = app.linux.as_ref().ok_or("not available for Linux")?;
+        let dir = crate::paths::linux_apps_dir()
+            .ok_or("no home folder")?
+            .join(&app.id);
+        // Menu entry and command, only where Stagehand made them.
+        if let Some(data) = dirs::data_dir() {
+            let desktop = data.join("applications").join(format!("{}.desktop", l.bin));
+            if std::fs::read_to_string(&desktop).is_ok_and(|t| t.contains("X-Stagehand=1")) {
+                let _ = std::fs::remove_file(&desktop);
+            }
+        }
+        if let Some(home) = dirs::home_dir() {
+            let link = home.join(".local/bin").join(&l.bin);
+            if std::fs::read_link(&link).is_ok_and(|t| t.starts_with(&dir)) {
+                let _ = std::fs::remove_file(&link);
+            }
+        }
+        std::fs::remove_dir_all(&dir)
+            .map_err(|e| format!("Could not remove {}: {e}", dir.display()))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        Err("not supported on this system".into())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -512,7 +599,10 @@ mod tests {
     fn windows_folders() {
         let base = Path::new(r"C:\Users\a\AppData\Local");
         let d = windows_app_dir(base, "Show Master");
-        assert!(d.ends_with("Stagehand/Show Master") || d.to_string_lossy().ends_with(r"Stagehand\Show Master"));
+        assert!(
+            d.ends_with("Stagehand/Show Master")
+                || d.to_string_lossy().ends_with(r"Stagehand\Show Master")
+        );
         // Not removable: missing files, same folder, or the new one inside it.
         let tmp = std::env::temp_dir().join(format!("sh-old-{}", std::process::id()));
         let old = tmp.join("Show Master");
@@ -583,6 +673,11 @@ mod tests {
         assert!(inst.path.ends_with("stagehand/apps/demo/demo"));
         assert!(home.join("data/applications/demo.desktop").exists());
         assert!(home.join(".local/bin/demo").exists());
+        assert!(removable(&app, &inst));
+        uninstall(&app, &inst).unwrap();
+        assert!(installed(&app).is_none_or(|i| !i.path.starts_with(&home)));
+        assert!(!home.join("data/applications/demo.desktop").exists());
+        assert!(std::fs::symlink_metadata(home.join(".local/bin/demo")).is_err());
         let _ = std::fs::remove_dir_all(home);
     }
 }

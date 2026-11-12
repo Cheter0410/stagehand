@@ -35,12 +35,17 @@ enum Msg {
     SelfLatest(Option<Release>),
     /// Source checkouts found: (app id, folder, state).
     Repos(Vec<(String, Option<PathBuf>, Option<RepoState>)>),
+    /// An app was uninstalled (or not).
+    Removed(String, Result<(), String>),
+    /// A source checkout was deleted (or not).
+    Deleted(String, Result<String, String>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Job {
     Download(u64, u64),
     Install,
+    Remove,
 }
 
 struct Card {
@@ -52,6 +57,8 @@ struct Card {
     job: Option<Job>,
     message: Option<(String, bool)>,
     notes_open: bool,
+    /// "Remove from this computer?" is being asked.
+    confirm_remove: bool,
     icon: Option<egui::TextureHandle>,
 }
 
@@ -71,6 +78,9 @@ pub struct Launcher {
     dev_message: Option<(String, bool)>,
     /// A source folder being typed in (app id, text).
     path_edit: Option<(String, String)>,
+    /// App id whose checkout is asked to be deleted / being deleted.
+    delete_ask: Option<String>,
+    deleting: Option<String>,
 }
 
 /// What the developer section asks for.
@@ -83,6 +93,10 @@ enum DevAction {
     EditPath(String),
     SetPath(String, String),
     CancelPath,
+    /// Ask before deleting the checkout.
+    Delete(String),
+    DeleteConfirm(String),
+    DeleteCancel,
 }
 
 impl Launcher {
@@ -103,6 +117,8 @@ impl Launcher {
             last_repo_scan: None,
             dev_message: None,
             path_edit: None,
+            delete_ask: None,
+            deleting: None,
         };
         l.set_catalog(Catalog::load(), ctx);
         l.refresh(ctx);
@@ -169,6 +185,7 @@ impl Launcher {
                         job: None,
                         message: None,
                         notes_open: false,
+                        confirm_remove: false,
                         icon,
                     }
                 }
@@ -280,6 +297,29 @@ impl Launcher {
                     for (id, dir, state) in list {
                         self.repos.insert(id, (dir, state));
                     }
+                }
+                Msg::Removed(id, r) => {
+                    if let Some(c) = self.card_mut(&id) {
+                        c.job = None;
+                        c.message = Some(match r {
+                            Ok(()) => (format!("{} was removed.", c.def.name), false),
+                            Err(e) => (e, true),
+                        });
+                    }
+                    self.detect(ctx);
+                }
+                Msg::Deleted(id, r) => {
+                    self.deleting = None;
+                    if r.is_ok() {
+                        self.settings.repos.remove(&id);
+                        self.settings.save();
+                        self.repos.remove(&id);
+                    }
+                    self.dev_message = Some(match r {
+                        Ok(m) => (m, false),
+                        Err(e) => (e, true),
+                    });
+                    self.scan_repos(ctx);
                 }
             }
         }
@@ -413,6 +453,28 @@ impl Launcher {
                 self.path_edit = None;
                 None
             }
+            DevAction::Delete(id) => {
+                self.delete_ask = Some(id);
+                None
+            }
+            DevAction::DeleteCancel => {
+                self.delete_ask = None;
+                None
+            }
+            DevAction::DeleteConfirm(id) => {
+                self.delete_ask = None;
+                if let Some(dir) = self.repos.get(&id).and_then(|(d, _)| d.clone()) {
+                    self.deleting = Some(id.clone());
+                    let (tx, c) = (self.tx.clone(), ctx.clone());
+                    std::thread::spawn(move || {
+                        let r = dev::delete_checkout(&dir)
+                            .map(|()| format!("Deleted {}.", short_path(&dir)));
+                        let _ = tx.send(Msg::Deleted(id, r));
+                        c.request_repaint();
+                    });
+                }
+                None
+            }
         };
         if let Some(steps) = run {
             self.dev_message = Some(if steps.is_empty() {
@@ -432,6 +494,22 @@ impl Launcher {
             });
         }
         self.scan_repos(ctx);
+    }
+
+    fn start_remove(&mut self, id: &str, ctx: &egui::Context) {
+        let tx = self.tx.clone();
+        let Some(c) = self.card_mut(id) else { return };
+        let Some(inst) = c.installed.clone() else {
+            return;
+        };
+        c.confirm_remove = false;
+        c.job = Some(Job::Remove);
+        let (def, cx) = (c.def.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let r = system::uninstall(&def, &inst);
+            let _ = tx.send(Msg::Removed(def.id.clone(), r));
+            cx.request_repaint();
+        });
     }
 
     fn start_install(&mut self, id: &str, ctx: &egui::Context) {
@@ -611,6 +689,9 @@ enum Action {
     Open,
     Notes,
     Page(String),
+    /// Show / hide the "remove?" question.
+    AskRemove(bool),
+    Remove,
 }
 
 impl eframe::App for Launcher {
@@ -676,7 +757,7 @@ impl eframe::App for Launcher {
                                     Some(Job::Download(d, t)) => {
                                         ui.add(egui::ProgressBar::new(if t > 0 { d as f32 / t as f32 } else { 0.0 }).desired_width(160.0));
                                     }
-                                    Some(Job::Install) => {
+                                    Some(Job::Install | Job::Remove) => {
                                         ui.spinner();
                                         ui.label("Installing…");
                                     }
@@ -710,7 +791,8 @@ impl eframe::App for Launcher {
                         ui.add_space(10.0);
                     }
                     if dev_on {
-                        dev_section(ui, &dev_apps, &self.repos, &mut self.path_edit, &self.dev_message, &mut dev_actions);
+                        let del = DeleteState { ask: self.delete_ask.as_deref(), busy: self.deleting.as_deref() };
+                        dev_section(ui, &dev_apps, &self.repos, &mut self.path_edit, del, &self.dev_message, &mut dev_actions);
                         ui.add_space(10.0);
                     }
                     ui.add_space(4.0);
@@ -741,6 +823,13 @@ impl eframe::App for Launcher {
                             }
                         }
                         Action::Page(url) => system::open_url(&url),
+                        Action::AskRemove(on) => {
+                            if let Some(c) = self.card_mut(&id) {
+                                c.confirm_remove = on;
+                                c.message = None;
+                            }
+                        }
+                        Action::Remove => self.start_remove(&id, &ctx),
                     }
                 }
             });
@@ -832,6 +921,21 @@ fn card(ui: &mut egui::Ui, c: &Card) -> Option<Action> {
                             ui.label("Installing…");
                             ui.spinner();
                         }
+                        Some(Job::Remove) => {
+                            ui.label("Removing…");
+                            ui.spinner();
+                        }
+                        None if c.confirm_remove => {
+                            if ui.button("Cancel").clicked() {
+                                action = Some(Action::AskRemove(false));
+                            }
+                            if ui
+                                .add(egui::Button::new(RichText::new("Remove").strong().color(Color32::WHITE)).fill(ERROR))
+                                .clicked()
+                            {
+                                action = Some(Action::Remove);
+                            }
+                        }
                         None => {
                             let primary = |text: &str| {
                                 egui::Button::new(
@@ -872,10 +976,41 @@ fn card(ui: &mut egui::Ui, c: &Card) -> Option<Action> {
                             {
                                 action = Some(Action::Notes);
                             }
+                            if let Some(inst) = &c.installed {
+                                let removable = system::removable(&c.def, inst);
+                                let b = ui
+                                    .add_enabled(
+                                        removable && !c.running,
+                                        egui::Button::new(RichText::new("Remove…").small().color(MUTED))
+                                            .frame(false),
+                                    )
+                                    .on_hover_text("Uninstall it from this computer")
+                                    .on_disabled_hover_text(if c.running {
+                                        format!("Quit {} first - it is running.", c.def.name)
+                                    } else {
+                                        format!(
+                                            "Installed by the system ({}) - remove it with the package manager.",
+                                            inst.path.display()
+                                        )
+                                    });
+                                if b.clicked() {
+                                    action = Some(Action::AskRemove(true));
+                                }
+                            }
                         }
                     },
                 );
             });
+            if c.confirm_remove && c.job.is_none() {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "Remove {} from this computer? Its settings and your files (shows, presentations) stay.",
+                        c.def.name
+                    ))
+                    .color(WARN),
+                );
+            }
             if let Some((m, err)) = &c.message {
                 ui.label(RichText::new(m).color(if *err { ERROR } else { OK }));
             }
@@ -949,11 +1084,19 @@ fn pill(ui: &mut egui::Ui, text: &str, color: Color32) {
 
 /// The developer section: per app its source folder and git state, with
 /// Release / Install (or Clone), and both for all apps at once.
+/// Deleting a checkout: which app is asked about / being deleted.
+#[derive(Clone, Copy)]
+struct DeleteState<'a> {
+    ask: Option<&'a str>,
+    busy: Option<&'a str>,
+}
+
 fn dev_section(
     ui: &mut egui::Ui,
     apps: &[AppDef],
     repos: &HashMap<String, (Option<PathBuf>, Option<RepoState>)>,
     path_edit: &mut Option<(String, String)>,
+    del: DeleteState,
     message: &Option<(String, bool)>,
     out: &mut Vec<DevAction>,
 ) {
@@ -984,7 +1127,20 @@ fn dev_section(
                     ui.painter().rect_filled(r, 2.0, accent);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let d = a.dev.as_ref();
-                        if dir.is_some() && state.is_some() {
+                        if del.busy == Some(a.id.as_str()) {
+                            ui.label(RichText::new("Deleting…").color(MUTED));
+                            ui.spinner();
+                        } else if del.ask == Some(a.id.as_str()) {
+                            if ui.button("Cancel").clicked() {
+                                out.push(DevAction::DeleteCancel);
+                            }
+                            if ui
+                                .add(egui::Button::new(RichText::new("Delete").strong().color(Color32::WHITE)).fill(ERROR))
+                                .clicked()
+                            {
+                                out.push(DevAction::DeleteConfirm(a.id.clone()));
+                            }
+                        } else if dir.is_some() && state.is_some() {
                             if dev::install_command(a).is_some()
                                 && ui
                                     .button("Install")
@@ -1000,6 +1156,13 @@ fn dev_section(
                                     .clicked()
                             {
                                 out.push(DevAction::Release(a.id.clone()));
+                            }
+                            if ui
+                                .add(egui::Button::new(RichText::new("Delete…").small().color(MUTED)).frame(false))
+                                .on_hover_text("Delete this source folder (with its build files) from this computer")
+                                .clicked()
+                            {
+                                out.push(DevAction::Delete(a.id.clone()));
                             }
                         } else if d.is_some()
                             && ui.button("Clone").on_hover_text("Get the source from GitHub").clicked()
@@ -1023,6 +1186,17 @@ fn dev_section(
                                             out.push(DevAction::CancelPath);
                                         }
                                     });
+                                }
+                                None if del.ask == Some(a.id.as_str()) => {
+                                    let place = dir.as_deref().map(short_path).unwrap_or_default();
+                                    let (text, color) = match state.as_ref().and_then(RepoState::would_lose) {
+                                        Some(lost) => (format!("Delete {place}? Lost for good: {lost}."), ERROR),
+                                        None => (
+                                            format!("Delete {place}? Everything in it is on GitHub; Clone gets it back."),
+                                            WARN,
+                                        ),
+                                    };
+                                    ui.add(egui::Label::new(RichText::new(text).small().color(color)).wrap());
                                 }
                                 None => {
                                     ui.horizontal(|ui| {
