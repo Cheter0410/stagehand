@@ -2,50 +2,65 @@
 # Builds Stagehand for Linux and Windows on one Linux PC:
 #   dist/stagehand-<v>-linux-x86_64.tar.gz   portable Linux program
 #   dist/Stagehand-Setup-<v>.exe             Windows installer (Inno Setup under Wine)
-# One-time setup (Arch): see README.md. SKIP_WINDOWS=1 skips Windows.
-# Releases: ./release.sh (builds with this script and uploads).
+# The list of what belongs to this build: dist/files-linux-pc.txt (release.sh
+# uploads exactly these). Nothing is done twice: tests once per commit,
+# packages only when the program changed. SKIP_WINDOWS=1 skips Windows.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=../scripts/ui.sh
+. scripts/ui.sh
 V=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-mkdir -p dist && touch dist/.build-start
+mkdir -p dist target
+FILES=()
+ui_header "Stagehand $V" "Linux + Windows bauen"
 
-echo "== Tests"
-# The output (audio libraries print a lot while devices are probed) goes to a
-# log file; only failures are shown.
-TESTLOG=target/test.log
-mkdir -p target
-if cargo test --locked >"$TESTLOG" 2>&1; then
-  echo "Tests ok ($(grep -c '^test .* ok$' "$TESTLOG") tests; log: $TESTLOG)"
+key=""
+[ -z "$(git status --porcelain --untracked-files=no 2>/dev/null)" ] && key=$(git rev-parse HEAD 2>/dev/null || true)
+if [ -n "$key" ] && [ -f "target/.tested/$key" ]; then
+  ui_skip "Tests" "für diesen Stand schon bestanden"
 else
-  grep -E '^test .* FAILED|^---- |panicked at|^error' -A4 "$TESTLOG" | head -80
-  echo "Tests failed - full log: $TESTLOG"
-  exit 1
+  ui_run "Tests" cargo test --locked
+  [ -n "$key" ] && mkdir -p target/.tested && touch "target/.tested/$key"
 fi
 
-echo "== Linux program"
-cargo build --release --locked
+ui_run "Linux-Programm" cargo build --release --locked
+BIN=target/release/stagehand
+KEY="$V-$(ui_fingerprint "$BIN")"
 NAME="stagehand-$V-linux-x86_64"
-rm -rf "dist/$NAME" && mkdir -p "dist/$NAME"
-cp target/release/stagehand README.md packaging/linux/stagehand.desktop "dist/$NAME/"
-cp assets/icon.png "dist/$NAME/stagehand.png"
-tar -C dist -czf "dist/$NAME.tar.gz" "$NAME" && rm -rf "dist/$NAME"
+TAR="dist/$NAME.tar.gz"
+make_tar() {
+  rm -rf "dist/$NAME" && mkdir -p "dist/$NAME"
+  cp "$BIN" README.md packaging/linux/stagehand.desktop "dist/$NAME/"
+  cp assets/icon.png "dist/$NAME/stagehand.png"
+  tar -C dist -czf "$TAR" "$NAME" && rm -rf "dist/$NAME"
+}
+if ui_fresh "$TAR" "$KEY"; then ui_skip "Linux-Archiv" "unverändert"; else
+  ui_run "Linux-Archiv" make_tar && ui_made "$TAR" "$KEY"
+fi
+FILES+=("$TAR")
 
 if [ -z "${SKIP_WINDOWS:-}" ]; then
-  echo "== Windows program"
-  rustup target add x86_64-pc-windows-gnu >/dev/null
-  cargo build --release --locked --target x86_64-pc-windows-gnu
+  ui_run "Windows-Programm" cargo build --release --locked --target x86_64-pc-windows-gnu
   EXE=target/x86_64-pc-windows-gnu/release/stagehand.exe
-  echo "== Windows installer"
+  WKEY="$V-$(ui_fingerprint "$EXE")"
   ISCC="${ISCC:-$HOME/.wine/drive_c/InnoSetup/ISCC.exe}"
   WINE=$(command -v wine || command -v wine64 || true)
   export WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml="
-  if [ -n "$WINE" ] && [ -f "$ISCC" ]; then
+  SETUP="dist/Stagehand-Setup-$V.exe"
+  make_setup() {
     rm -rf stage && mkdir -p stage && cp "$EXE" README.md stage/
     "$WINE" "$ISCC" "/DAppVersion=$V" "Z:$(pwd)/packaging/windows/stagehand.iss"
     rm -rf stage
+  }
+  if [ -n "$WINE" ] && [ -f "$ISCC" ]; then
+    if ui_fresh "$SETUP" "$WKEY"; then ui_skip "Windows-Installer" "unverändert"; else
+      ui_run "Windows-Installer" make_setup && ui_made "$SETUP" "$WKEY"
+    fi
+    FILES+=("$SETUP")
   else
-    echo "Wine or Inno Setup ($ISCC) not found - skipping the Windows installer."
+    ui_warn "Windows-Installer übersprungen: Wine oder Inno Setup fehlt (release.sh richtet beides ein)"
   fi
 fi
 
-ls -la dist
+{ echo "$V"; printf '%s\n' "${FILES[@]}"; } > dist/files-linux-pc.txt
+ui_done
