@@ -495,6 +495,7 @@ mod tests {
                 asset_suffix: "-linux-x86_64.tar.gz".into(),
                 bin: "demo".into(),
             }),
+            dev: None,
         };
         install_tarball(&app, &file, "1.0.0").unwrap();
         let inst = installed(&app).unwrap();

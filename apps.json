@@ -6,14 +6,27 @@
       "tagline": "Cue-based show control: audio playback, MIDI, OSC, timecode and tablet remote.",
       "color": "#22c55e",
       "releases": "Cheter0410/show-master-releases",
-      "macos": { "asset_suffix": ".dmg", "app": "ShowMaster.app" },
+      "macos": {
+        "asset_suffix": ".dmg",
+        "app": "ShowMaster.app"
+      },
       "windows": {
         "asset_prefix": "ShowMaster-Setup-",
         "asset_suffix": ".exe",
         "inno_app_id": "{B7E1B2B4-5C0E-4E63-9A4D-7B0F5D2C8E31}",
         "exe": "showmaster.exe"
       },
-      "linux": { "asset_suffix": "-linux-x86_64.tar.gz", "bin": "showmaster" }
+      "linux": {
+        "asset_suffix": "-linux-x86_64.tar.gz",
+        "bin": "showmaster"
+      },
+      "dev": {
+        "repo": "Cheter0410/Show-Master",
+        "folder": "show-master",
+        "release": "./release.sh",
+        "install_macos": "bash install-mac.sh",
+        "install_linux": "./install.sh"
+      }
     },
     {
       "id": "beamweave",
@@ -21,14 +34,25 @@
       "tagline": "Projection mapping, LED pixel mapping and NDI.",
       "color": "#e94f8a",
       "releases": "Cheter0410/beamweave-releases",
-      "macos": { "asset_suffix": ".dmg", "app": "Beamweave.app" },
+      "macos": {
+        "asset_suffix": ".dmg",
+        "app": "Beamweave.app"
+      },
       "windows": {
         "asset_prefix": "Beamweave-Setup-",
         "asset_suffix": ".exe",
         "inno_app_id": "{6C0B6C0E-6B0D-4E0B-9B55-2F3C1B7E4A91}",
         "exe": "beamweave.exe"
       },
-      "linux": { "asset_suffix": "-linux-x86_64.tar.gz", "bin": "beamweave" }
+      "linux": {
+        "asset_suffix": "-linux-x86_64.tar.gz",
+        "bin": "beamweave"
+      },
+      "dev": {
+        "repo": "Cheter0410/beamweave",
+        "folder": "beamweave",
+        "release": "scripts/release.sh"
+      }
     }
   ]
 }

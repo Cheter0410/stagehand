@@ -3,10 +3,12 @@
 //! report back through a channel.
 
 use crate::catalog::{self, AppDef, Catalog};
+use crate::dev::{self, RepoState, Settings, Step};
 use crate::github::{self, Release};
 use crate::system::{self, Installed};
 use egui::{Color32, CornerRadius, Frame, Margin, RichText, Stroke, Vec2};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -31,6 +33,8 @@ enum Msg {
     Installing(String),
     Finished(String, Result<(), String>),
     SelfLatest(Option<Release>),
+    /// Source checkouts found: (app id, folder, state).
+    Repos(Vec<(String, Option<PathBuf>, Option<RepoState>)>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -60,6 +64,25 @@ pub struct Launcher {
     self_job: Option<Job>,
     self_error: Option<String>,
     icons_wanted: HashMap<String, bool>,
+    settings: Settings,
+    /// App id -> (checkout, state), for the developer section.
+    repos: HashMap<String, (Option<PathBuf>, Option<RepoState>)>,
+    last_repo_scan: Option<Instant>,
+    dev_message: Option<(String, bool)>,
+    /// A source folder being typed in (app id, text).
+    path_edit: Option<(String, String)>,
+}
+
+/// What the developer section asks for.
+enum DevAction {
+    Release(String),
+    Install(String),
+    Clone(String),
+    ReleaseAll,
+    InstallAll,
+    EditPath(String),
+    SetPath(String, String),
+    CancelPath,
 }
 
 impl Launcher {
@@ -75,6 +98,11 @@ impl Launcher {
             self_job: None,
             self_error: None,
             icons_wanted: HashMap::new(),
+            settings: Settings::load(),
+            repos: HashMap::new(),
+            last_repo_scan: None,
+            dev_message: None,
+            path_edit: None,
         };
         l.set_catalog(Catalog::load(), ctx);
         l.refresh(ctx);
@@ -248,8 +276,162 @@ impl Launcher {
                     self.detect(ctx);
                 }
                 Msg::SelfLatest(r) => self.self_update = r,
+                Msg::Repos(list) => {
+                    for (id, dir, state) in list {
+                        self.repos.insert(id, (dir, state));
+                    }
+                }
             }
         }
+    }
+
+    /// Apps with a source repository: the catalog's, then Stagehand itself.
+    fn dev_apps(&self) -> Vec<AppDef> {
+        let mut v: Vec<AppDef> = self
+            .cards
+            .iter()
+            .filter(|c| c.def.dev.is_some())
+            .map(|c| c.def.clone())
+            .collect();
+        v.push(self_def());
+        v
+    }
+
+    /// Find the source checkouts and their git state (off the UI thread).
+    fn scan_repos(&mut self, ctx: &egui::Context) {
+        self.last_repo_scan = Some(Instant::now());
+        let (apps, settings, tx, c) = (
+            self.dev_apps(),
+            self.settings.clone(),
+            self.tx.clone(),
+            ctx.clone(),
+        );
+        std::thread::spawn(move || {
+            let list = apps
+                .iter()
+                .map(|a| {
+                    let dir = dev::find_checkout(a, &settings);
+                    let state = dir.as_deref().and_then(dev::repo_state);
+                    (a.id.clone(), dir, state)
+                })
+                .collect();
+            let _ = tx.send(Msg::Repos(list));
+            c.request_repaint();
+        });
+    }
+
+    /// The checkout of an app, if it is a usable git checkout.
+    fn checkout(&self, id: &str) -> Option<PathBuf> {
+        self.repos
+            .get(id)
+            .filter(|(_, s)| s.is_some())
+            .and_then(|(d, _)| d.clone())
+    }
+
+    fn dev_action(&mut self, action: DevAction, ctx: &egui::Context) {
+        let apps = self.dev_apps();
+        let release_step = |a: &AppDef, dir: PathBuf| {
+            Some(Step {
+                name: format!("Release {}", a.name),
+                dir,
+                command: a.dev.as_ref()?.release.clone()?,
+            })
+        };
+        let install_step = |a: &AppDef, dir: PathBuf| {
+            Some(Step {
+                name: format!("Install {}", a.name),
+                dir,
+                command: dev::install_command(a)?,
+            })
+        };
+        let one = |id: &str, make: &dyn Fn(&AppDef, PathBuf) -> Option<Step>| -> Vec<Step> {
+            apps.iter()
+                .find(|a| a.id == id)
+                .and_then(|a| make(a, self.checkout(id)?))
+                .into_iter()
+                .collect()
+        };
+        let all = |make: &dyn Fn(&AppDef, PathBuf) -> Option<Step>| -> Vec<Step> {
+            apps.iter()
+                .filter_map(|a| make(a, self.checkout(&a.id)?))
+                .collect()
+        };
+        let run = match action {
+            DevAction::Release(id) => Some(one(&id, &release_step)),
+            DevAction::Install(id) => Some(one(&id, &install_step)),
+            DevAction::ReleaseAll => Some(all(&release_step)),
+            DevAction::InstallAll => Some(all(&install_step)),
+            DevAction::Clone(id) => {
+                let others: Vec<PathBuf> =
+                    self.repos.values().filter_map(|(d, _)| d.clone()).collect();
+                let app = apps.iter().find(|a| a.id == id);
+                match (app, app.and_then(|a| dev::default_dir(a, &others))) {
+                    (Some(app), Some(target)) => {
+                        let parent = target.parent().map(PathBuf::from).unwrap_or_default();
+                        let _ = std::fs::create_dir_all(&parent);
+                        let repo = app.dev.as_ref().map(|d| d.repo.clone()).unwrap_or_default();
+                        self.settings.repos.insert(id, target.display().to_string());
+                        self.settings.save();
+                        Some(vec![Step {
+                            name: format!("Clone {} into {}", app.name, target.display()),
+                            dir: parent,
+                            command: format!(
+                                "git clone https://github.com/{repo}.git {}",
+                                dev::quote(&target.display().to_string())
+                            ),
+                        }])
+                    }
+                    _ => None,
+                }
+            }
+            DevAction::EditPath(id) => {
+                let cur = self
+                    .repos
+                    .get(&id)
+                    .and_then(|(d, _)| d.as_ref())
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                self.path_edit = Some((id, cur));
+                None
+            }
+            DevAction::SetPath(id, text) => {
+                let t = text.trim();
+                if t.is_empty() {
+                    self.settings.repos.remove(&id);
+                } else {
+                    let p = match (t.strip_prefix("~/"), dirs::home_dir()) {
+                        (Some(rest), Some(home)) => home.join(rest),
+                        _ => PathBuf::from(t),
+                    };
+                    self.settings.repos.insert(id, p.display().to_string());
+                }
+                self.settings.save();
+                self.path_edit = None;
+                None
+            }
+            DevAction::CancelPath => {
+                self.path_edit = None;
+                None
+            }
+        };
+        if let Some(steps) = run {
+            self.dev_message = Some(if steps.is_empty() {
+                ("Nothing to do: no source folder found.".into(), true)
+            } else {
+                let title = if steps.len() == 1 {
+                    steps[0].name.clone()
+                } else if steps[0].name.starts_with("Release") {
+                    "Release all apps".into()
+                } else {
+                    "Install all apps from source".into()
+                };
+                match dev::open_terminal(&title, &steps) {
+                    Ok(()) => (format!("Opened a terminal: {title}"), false),
+                    Err(e) => (e, true),
+                }
+            });
+        }
+        self.scan_repos(ctx);
     }
 
     fn start_install(&mut self, id: &str, ctx: &egui::Context) {
@@ -345,6 +527,13 @@ fn self_def() -> AppDef {
         linux: Some(catalog::LinuxDef {
             asset_suffix: "-linux-x86_64.tar.gz".into(),
             bin: "stagehand".into(),
+        }),
+        dev: Some(catalog::DevDef {
+            repo: "Cheter0410/stagehand".into(),
+            folder: "stagehand".into(),
+            release: Some("./release.sh".into()),
+            install_macos: Some("bash install-mac.sh".into()),
+            install_linux: Some("./install.sh".into()),
         }),
     }
 }
@@ -456,6 +645,15 @@ impl eframe::App for Launcher {
                             .button("Check for updates")
                             .on_hover_text("Look for new versions of every app")
                             .clicked();
+                        if dev::available()
+                            && ui
+                                .selectable_label(self.settings.dev_mode, "Developer")
+                                .on_hover_text("Release apps and install them from source")
+                                .clicked()
+                        {
+                            self.settings.dev_mode = !self.settings.dev_mode;
+                            self.settings.save();
+                        }
                     });
                 });
                 if refresh {
@@ -498,11 +696,21 @@ impl eframe::App for Launcher {
                 }
 
                 let mut actions: Vec<(String, Action)> = Vec::new();
+                let mut dev_actions: Vec<DevAction> = Vec::new();
+                let dev_on = self.settings.dev_mode && dev::available();
+                if dev_on && self.last_repo_scan.is_none_or(|t| t.elapsed() > Duration::from_secs(10)) {
+                    self.scan_repos(&ctx);
+                }
+                let dev_apps = if dev_on { self.dev_apps() } else { Vec::new() };
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     for c in &self.cards {
                         if let Some(a) = card(ui, c) {
                             actions.push((c.def.id.clone(), a));
                         }
+                        ui.add_space(10.0);
+                    }
+                    if dev_on {
+                        dev_section(ui, &dev_apps, &self.repos, &mut self.path_edit, &self.dev_message, &mut dev_actions);
                         ui.add_space(10.0);
                     }
                     ui.add_space(4.0);
@@ -514,6 +722,9 @@ impl eframe::App for Launcher {
                         .color(MUTED),
                     );
                 });
+                for a in dev_actions {
+                    self.dev_action(a, &ctx);
+                }
                 for (id, a) in actions {
                     match a {
                         Action::Install => self.start_install(&id, &ctx),
@@ -734,4 +945,147 @@ fn pill(ui: &mut egui::Ui, text: &str, color: Color32) {
             .color(Color32::BLACK)
             .background_color(color),
     );
+}
+
+/// The developer section: per app its source folder and git state, with
+/// Release / Install (or Clone), and both for all apps at once.
+fn dev_section(
+    ui: &mut egui::Ui,
+    apps: &[AppDef],
+    repos: &HashMap<String, (Option<PathBuf>, Option<RepoState>)>,
+    path_edit: &mut Option<(String, String)>,
+    message: &Option<(String, bool)>,
+    out: &mut Vec<DevAction>,
+) {
+    Frame::new()
+        .fill(CARD)
+        .stroke(Stroke::new(1.0, LINE))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::same(14))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Developer").size(17.0).strong());
+                ui.label(
+                    RichText::new("opens a terminal and runs the project's own scripts")
+                        .small()
+                        .color(MUTED),
+                );
+            });
+            for a in apps {
+                let (dir, state) = repos.get(&a.id).cloned().unwrap_or((None, None));
+                let accent = catalog::parse_color(&a.color)
+                    .map(|[r, g, b]| Color32::from_rgb(r, g, b))
+                    .unwrap_or(OK);
+                ui.add_space(4.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(Vec2::new(4.0, 34.0), egui::Sense::hover());
+                    ui.painter().rect_filled(r, 2.0, accent);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let d = a.dev.as_ref();
+                        if dir.is_some() && state.is_some() {
+                            if dev::install_command(a).is_some()
+                                && ui
+                                    .button("Install")
+                                    .on_hover_text("Get the latest source, build it and install it on this computer")
+                                    .clicked()
+                            {
+                                out.push(DevAction::Install(a.id.clone()));
+                            }
+                            if d.and_then(|d| d.release.as_ref()).is_some()
+                                && ui
+                                    .add(egui::Button::new(RichText::new("Release").strong().color(Color32::BLACK)).fill(accent))
+                                    .on_hover_text("Build a new version and upload it (release.sh)")
+                                    .clicked()
+                            {
+                                out.push(DevAction::Release(a.id.clone()));
+                            }
+                        } else if d.is_some()
+                            && ui.button("Clone").on_hover_text("Get the source from GitHub").clicked()
+                        {
+                            out.push(DevAction::Clone(a.id.clone()));
+                        }
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                            ui.label(RichText::new(&a.name).strong());
+                            match path_edit.as_mut().filter(|(id, _)| id == &a.id) {
+                                Some((_, text)) => {
+                                    ui.horizontal(|ui| {
+                                        let r = ui.add(
+                                            egui::TextEdit::singleline(text)
+                                                .hint_text("~/dev/…  (empty = search automatically)")
+                                                .desired_width((ui.available_width() - 120.0).max(120.0)),
+                                        );
+                                        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                        if ui.small_button("OK").clicked() || enter {
+                                            out.push(DevAction::SetPath(a.id.clone(), text.clone()));
+                                        } else if ui.small_button("Cancel").clicked() {
+                                            out.push(DevAction::CancelPath);
+                                        }
+                                    });
+                                }
+                                None => {
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .add(egui::Button::new(RichText::new("Folder…").small().color(MUTED)).small())
+                                            .on_hover_text("Use another source folder")
+                                            .clicked()
+                                        {
+                                            out.push(DevAction::EditPath(a.id.clone()));
+                                        }
+                                        let (text, color) = match (&dir, &state) {
+                                            (Some(d), Some(s)) => {
+                                                let mut t = format!("{} · {}", short_path(d), s.branch);
+                                                if s.changes > 0 {
+                                                    t.push_str(&format!(" · {} changed file(s)", s.changes));
+                                                }
+                                                if s.behind > 0 {
+                                                    t.push_str(&format!(" · {} new commit(s) on GitHub", s.behind));
+                                                }
+                                                (t, if s.changes > 0 { WARN } else { MUTED })
+                                            }
+                                            (Some(d), None) => (format!("{} · not a git checkout", short_path(d)), ERROR),
+                                            (None, _) => ("source not on this computer".into(), MUTED),
+                                        };
+                                        ui.add(egui::Label::new(RichText::new(text).small().color(color)).truncate());
+                                    });
+                                }
+                            }
+                        });
+                    });
+                });
+            }
+            ui.add_space(4.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                let any = apps
+                    .iter()
+                    .any(|a| repos.get(&a.id).is_some_and(|(d, s)| d.is_some() && s.is_some()));
+                if ui
+                    .add_enabled(any, egui::Button::new("Release all"))
+                    .on_hover_text("One terminal that releases every app in turn (Stagehand last)")
+                    .clicked()
+                {
+                    out.push(DevAction::ReleaseAll);
+                }
+                if ui
+                    .add_enabled(any, egui::Button::new("Install all"))
+                    .on_hover_text("One terminal that builds and installs every app from source (Stagehand last)")
+                    .clicked()
+                {
+                    out.push(DevAction::InstallAll);
+                }
+                if let Some((m, err)) = message {
+                    ui.label(RichText::new(m).small().color(if *err { ERROR } else { OK }));
+                }
+            });
+        });
+}
+
+/// A folder with the home folder shown as `~`.
+fn short_path(p: &std::path::Path) -> String {
+    match dirs::home_dir().and_then(|h| p.strip_prefix(h).ok().map(PathBuf::from)) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => p.display().to_string(),
+    }
 }

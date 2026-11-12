@@ -38,6 +38,24 @@ pub struct AppDef {
     pub windows: Option<WinDef>,
     #[serde(default)]
     pub linux: Option<LinuxDef>,
+    /// Where the source lives and how it is released / installed from source
+    /// (developer section).
+    #[serde(default)]
+    pub dev: Option<DevDef>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(default)]
+pub struct DevDef {
+    /// GitHub repository with the source (`owner/name`).
+    pub repo: String,
+    /// Usual name of the checkout folder.
+    pub folder: String,
+    /// Command (in the checkout) that releases a new version.
+    pub release: Option<String>,
+    /// Commands that build and install from source.
+    pub install_macos: Option<String>,
+    pub install_linux: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -100,6 +118,16 @@ impl Catalog {
     }
 
     fn merged_with(mut self, other: &Catalog) -> Self {
+        // Developer details this build knows fill in an older live catalog.
+        for a in &mut self.apps {
+            if a.dev.is_none() {
+                a.dev = other
+                    .apps
+                    .iter()
+                    .find(|b| b.id == a.id)
+                    .and_then(|b| b.dev.clone());
+            }
+        }
         for a in &other.apps {
             if !self.apps.iter().any(|b| b.id == a.id) {
                 self.apps.push(a.clone());
@@ -163,10 +191,18 @@ mod tests {
                 macos: None,
                 windows: None,
                 linux: None,
+                dev: None,
             }],
         };
         let m = live.merged_with(&Catalog::built_in());
         assert_eq!(m.apps[0].id, "new");
         assert!(m.apps.iter().any(|a| a.id == "showmaster"));
+        let old = Catalog {
+            apps: vec![AppDef {
+                dev: None,
+                ..Catalog::built_in().apps[0].clone()
+            }],
+        };
+        assert!(old.merged_with(&Catalog::built_in()).apps[0].dev.is_some());
     }
 }
