@@ -10,7 +10,17 @@ V=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
 mkdir -p dist && touch dist/.build-start
 
 echo "== Tests"
-cargo test --locked
+# The output (audio libraries print a lot while devices are probed) goes to a
+# log file; only failures are shown.
+TESTLOG=target/test.log
+mkdir -p target
+if cargo test --locked >"$TESTLOG" 2>&1; then
+  echo "Tests ok ($(grep -c '^test .* ok$' "$TESTLOG") tests; log: $TESTLOG)"
+else
+  grep -E '^test .* FAILED|^---- |panicked at|^error' -A4 "$TESTLOG" | head -80
+  echo "Tests failed - full log: $TESTLOG"
+  exit 1
+fi
 
 echo "== Linux program"
 cargo build --release --locked
