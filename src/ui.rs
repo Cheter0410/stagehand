@@ -133,7 +133,8 @@ impl Launcher {
         // A newer Stagehand?
         let (tx, c) = (l.tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let r = github::latest(SELF_RELEASES)
+            let me = self_def();
+            let r = github::latest(SELF_RELEASES, |r| system::pick_asset(&me, r).is_some())
                 .ok()
                 .flatten()
                 .filter(|r| github::is_newer(&r.version, env!("CARGO_PKG_VERSION")));
@@ -204,7 +205,7 @@ impl Launcher {
         for def in defs {
             let (tx, c) = (self.tx.clone(), ctx.clone());
             std::thread::spawn(move || {
-                let r = github::latest(&def.releases);
+                let r = github::latest(&def.releases, |r| system::pick_asset(&def, r).is_some());
                 let _ = tx.send(Msg::Latest(def.id, r));
                 c.request_repaint();
             });

@@ -52,10 +52,12 @@ One command, the same on both computers (as in Show Master):
     ./release.sh            # Arch PC: Linux + Windows, Mac: the DMG - builds and uploads
     ./release.sh status     # what of the current version is up already
 
-Version numbers are automatic: if a draft release exists, this computer builds exactly its tagged state
-and replaces its own files in it; if the current version is already published, it is raised by one
-(the commit subjects since become "what's new"), committed, tagged and pushed, and a new draft is made.
-Once Mac, Windows and Linux are in the draft it is published, and installed copies offer the update.
+Each computer publishes on its own; nobody waits for the other. If the current version is published
+and something changed since, the version is raised by one (the commit subjects since become "what's
+new"), committed, tagged, pushed and published with this computer's files. If the newest release lacks
+this computer's files, it builds exactly that tagged state and adds them. Until then the other systems
+simply stay on the last version that exists for them - Stagehand always offers the newest release
+that has a file for the system it runs on.
 Missing tools (GitHub login, Rust, the Windows installer tools on the Arch PC) are set up on first use.
 
 The app icon is `assets/icon.svg`; `node scripts/render-icon.mjs` renders the PNG and ICO from it.

@@ -63,14 +63,39 @@ pub fn get_text(url: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// The newest release of `repo` (`owner/name`); `Ok(None)` if there is none yet.
-pub fn latest(repo: &str) -> Result<Option<Release>, String> {
-    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+/// The newest published release of `repo` that `usable` accepts (one that has
+/// a file for this system: the Mac and the PC publish on their own, so the
+/// very newest may not have it yet). Without any usable one, the newest.
+/// `Ok(None)` if there is no release yet.
+pub fn latest(repo: &str, usable: impl Fn(&Release) -> bool) -> Result<Option<Release>, String> {
+    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=20");
     let Some(text) = get_text(&url)? else {
         return Ok(None);
     };
     let json: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    Ok(parse_release(&json))
+    Ok(newest(&json, usable))
+}
+
+pub fn newest(list: &Value, usable: impl Fn(&Release) -> bool) -> Option<Release> {
+    let flag = |j: &Value, k: &str| j.get(k).and_then(Value::as_bool).unwrap_or(false);
+    let all: Vec<Release> = list
+        .as_array()?
+        .iter()
+        .filter(|j| !flag(j, "draft") && !flag(j, "prerelease"))
+        .filter_map(parse_release)
+        .collect();
+    let best = |v: Vec<&Release>| {
+        v.into_iter()
+            .reduce(|a, b| {
+                if is_newer(&b.version, &a.version) {
+                    b
+                } else {
+                    a
+                }
+            })
+            .cloned()
+    };
+    best(all.iter().filter(|r| usable(r)).collect()).or_else(|| best(all.iter().collect()))
 }
 
 pub fn parse_release(json: &Value) -> Option<Release> {
@@ -192,6 +217,32 @@ pub fn download(a: &Asset, dir: &Path, progress: &dyn Fn(u64, u64)) -> Result<Pa
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn newest_release_that_has_a_file_for_this_system() {
+        let list = serde_json::json!([
+            {"tag_name": "v0.3.0", "draft": true, "assets": [{"name": "A-0.3.0.dmg", "browser_download_url": "u"}]},
+            {"tag_name": "v0.2.0", "assets": [{"name": "a-0.2.0.tar.gz", "browser_download_url": "u"}]},
+            {"tag_name": "v0.1.0", "assets": [{"name": "A-0.1.0.dmg", "browser_download_url": "u"}]},
+            {"tag_name": "v0.1.1", "assets": [{"name": "A-0.1.1.dmg", "browser_download_url": "u"}]}
+        ]);
+        let mac = |r: &Release| r.asset("", ".dmg").is_some();
+        assert_eq!(newest(&list, mac).unwrap().version, "0.1.1");
+        assert_eq!(
+            newest(&list, |r| r.asset("", ".tar.gz").is_some())
+                .unwrap()
+                .version,
+            "0.2.0"
+        );
+        // Nothing for this system at all: the newest, so the card still shows a version.
+        assert_eq!(
+            newest(&list, |r| r.asset("", ".exe").is_some())
+                .unwrap()
+                .version,
+            "0.2.0"
+        );
+        assert!(newest(&serde_json::json!([]), mac).is_none());
+    }
 
     #[test]
     fn versions_compare_numerically() {
