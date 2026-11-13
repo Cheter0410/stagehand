@@ -7,8 +7,9 @@ Beamweave and whatever comes next. Written in Rust (egui), for macOS, Windows an
 - Downloads come from each app's GitHub releases and are checked against the SHA-256 GitHub lists.
 - A running app is never replaced (a show may be going on).
 - **Remove…** on a card uninstalls the app (macOS: the bundle, Windows: its own uninstaller, Linux: the
-  folder, menu entry and command). Settings and files made with it stay. An app the system's package
-  manager installed is left to that.
+  folder, menu entry and command). Settings and files made with it stay. A copy the system installed
+  (Arch or Debian package, files in `/usr/local`) is removed through the package manager; the desktop
+  asks for the password.
 - Developer section: **Delete…** removes a source folder (build files included) after saying what would
   be lost (changed or new files, commits not on GitHub); **Clone** gets it back.
 - Stagehand updates itself from `Cheter0410/stagehand-releases`.

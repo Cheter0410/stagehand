@@ -469,7 +469,9 @@ fn install_tarball(app: &AppDef, file: &Path, version: &str) -> Result<(), Strin
             .iter()
             .map(|n| dest.join(n))
             .find(|p| p.exists());
-        let icon = icon.map(|i| format!("Icon={}\n", i.display())).unwrap_or_default();
+        let icon = icon
+            .map(|i| format!("Icon={}\n", i.display()))
+            .unwrap_or_default();
         let packaged = std::fs::read_to_string(dest.join(format!("{}.desktop", l.bin))).ok();
         let desktop = menu_entry(packaged.as_deref(), &app.name, &app.tagline, &bin, &icon);
         let _ = std::fs::write(apps.join(format!("{}.desktop", l.bin)), desktop);
@@ -504,13 +506,19 @@ fn menu_entry(packaged: Option<&str>, name: &str, tagline: &str, bin: &Path, ico
     for line in p.lines() {
         if let Some(exec) = line.strip_prefix("Exec=") {
             // "lantern %f" -> " %f"
-            args = exec.find(' ').map(|i| exec[i..].to_string()).unwrap_or_default();
+            args = exec
+                .find(' ')
+                .map(|i| exec[i..].to_string())
+                .unwrap_or_default();
         } else if !line.starts_with("Icon=") && !line.starts_with("X-Stagehand=") {
             out.push_str(line);
             out.push('\n');
         }
     }
-    out.push_str(&format!("Exec=\"{}\"{args}\n{icon}X-Stagehand=1\n", bin.display()));
+    out.push_str(&format!(
+        "Exec=\"{}\"{args}\n{icon}X-Stagehand=1\n",
+        bin.display()
+    ));
     out
 }
 
@@ -518,17 +526,78 @@ fn menu_entry(packaged: Option<&str>, name: &str, tagline: &str, bin: &Path, ico
 // Uninstall
 // --------------------------------------------------------------------------
 
-/// Whether Stagehand can remove this copy itself (not one the system's
-/// package manager installed).
+/// Whether Stagehand can remove this copy: its own always; one the system
+/// installed (package, /usr/local) when the desktop can ask for the password.
 pub fn removable(app: &AppDef, inst: &Installed) -> bool {
     #[cfg(target_os = "linux")]
     {
-        crate::paths::linux_apps_dir().is_some_and(|d| inst.path.starts_with(d.join(&app.id)))
+        static PKEXEC: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        linux_own_copy(app, inst) || *PKEXEC.get_or_init(|| on_path("pkexec").is_some())
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (app, inst);
         true
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_own_copy(app: &AppDef, inst: &Installed) -> bool {
+    crate::paths::linux_apps_dir().is_some_and(|d| inst.path.starts_with(d.join(&app.id)))
+}
+
+/// What removes a copy the system installed: the package manager for a
+/// package, plain deletion for the files an install script put in /usr/local.
+#[cfg(target_os = "linux")]
+fn linux_system_command(
+    bin: &Path,
+    owner_pacman: Option<&str>,
+    owner_dpkg: Option<&str>,
+) -> Option<Vec<String>> {
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    if let Some(pkg) = owner_pacman.map(str::trim).filter(|p| !p.is_empty()) {
+        return Some(s(&["pacman", "-R", "--noconfirm", pkg]));
+    }
+    // "showmaster: /usr/bin/showmaster"
+    if let Some(pkg) = owner_dpkg
+        .and_then(|o| o.split(':').next())
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        return Some(s(&["apt-get", "remove", "-y", pkg]));
+    }
+    let name = bin.file_name()?.to_str()?;
+    bin.starts_with("/usr/local/bin").then(|| {
+        s(&[
+            "rm",
+            "-f",
+            &bin.to_string_lossy(),
+            &format!("/usr/local/share/applications/{name}.desktop"),
+            &format!("/usr/local/share/icons/hicolor/512x512/apps/{name}.png"),
+        ])
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_system_remove(app: &AppDef, inst: &Installed) -> Result<(), String> {
+    let bin = std::fs::canonicalize(&inst.path).unwrap_or_else(|_| inst.path.clone());
+    let pacman = output(Command::new("pacman").arg("-Qqo").arg(&bin));
+    let dpkg = output(Command::new("dpkg").arg("-S").arg(&bin));
+    let cmd = linux_system_command(&bin, pacman.as_deref(), dpkg.as_deref()).ok_or_else(|| {
+        format!(
+            "{} was installed by the system ({}): remove it with the package manager.",
+            app.name,
+            inst.path.display()
+        )
+    })?;
+    // The desktop asks for the password (polkit).
+    match Command::new("pkexec").args(&cmd).status() {
+        Ok(st) if st.success() => Ok(()),
+        Ok(st) if st.code() == Some(126) => Err("Not removed: the password was not given.".into()),
+        _ => Err(format!(
+            "Could not remove it. In a terminal: sudo {}",
+            cmd.join(" ")
+        )),
     }
 }
 
@@ -568,12 +637,8 @@ pub fn uninstall(app: &AppDef, inst: &Installed) -> Result<(), String> {
     }
     #[cfg(target_os = "linux")]
     {
-        if !removable(app, inst) {
-            return Err(format!(
-                "{} was installed by the system ({}): remove it with the package manager.",
-                app.name,
-                inst.path.display()
-            ));
+        if !linux_own_copy(app, inst) {
+            return linux_system_remove(app, inst);
         }
         let l = app.linux.as_ref().ok_or("not available for Linux")?;
         let dir = crate::paths::linux_apps_dir()
@@ -655,9 +720,30 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn system_copies_are_removed_the_way_they_came() {
+        let bin = Path::new("/usr/bin/showmaster");
+        let c = linux_system_command(bin, Some("showmaster\n"), None).unwrap();
+        assert_eq!(c, ["pacman", "-R", "--noconfirm", "showmaster"]);
+        let c = linux_system_command(bin, None, Some("showmaster: /usr/bin/showmaster\n")).unwrap();
+        assert_eq!(c, ["apt-get", "remove", "-y", "showmaster"]);
+        // Not from a package and not from an install script: left alone.
+        assert!(linux_system_command(bin, None, None).is_none());
+        let c = linux_system_command(Path::new("/usr/local/bin/lantern"), None, None).unwrap();
+        assert_eq!(c[..3], ["rm", "-f", "/usr/local/bin/lantern"]);
+        assert!(c.contains(&"/usr/local/share/applications/lantern.desktop".to_string()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn menu_entry_keeps_the_packaged_file_types() {
         let packaged = "[Desktop Entry]\nName=Lantern\nExec=lantern %f\nIcon=lantern\nMimeType=application/pdf;\n";
-        let e = menu_entry(Some(packaged), "Lantern", "t", Path::new("/a b/lantern"), "Icon=/a b/icon.png\n");
+        let e = menu_entry(
+            Some(packaged),
+            "Lantern",
+            "t",
+            Path::new("/a b/lantern"),
+            "Icon=/a b/icon.png\n",
+        );
         assert!(e.contains("MimeType=application/pdf;\n"));
         assert!(e.contains("Exec=\"/a b/lantern\" %f\n"));
         assert!(e.contains("Icon=/a b/icon.png\n") && !e.contains("Icon=lantern"));
