@@ -469,13 +469,9 @@ fn install_tarball(app: &AppDef, file: &Path, version: &str) -> Result<(), Strin
             .iter()
             .map(|n| dest.join(n))
             .find(|p| p.exists());
-        let desktop = format!(
-            "[Desktop Entry]\nType=Application\nName={}\nComment={}\nExec=\"{}\" %F\n{}Terminal=false\nCategories=AudioVideo;\nX-Stagehand=1\n",
-            app.name,
-            app.tagline,
-            bin.display(),
-            icon.map(|i| format!("Icon={}\n", i.display())).unwrap_or_default(),
-        );
+        let icon = icon.map(|i| format!("Icon={}\n", i.display())).unwrap_or_default();
+        let packaged = std::fs::read_to_string(dest.join(format!("{}.desktop", l.bin))).ok();
+        let desktop = menu_entry(packaged.as_deref(), &app.name, &app.tagline, &bin, &icon);
         let _ = std::fs::write(apps.join(format!("{}.desktop", l.bin)), desktop);
     }
     if let Some(home) = dirs::home_dir() {
@@ -490,6 +486,32 @@ fn install_tarball(app: &AppDef, file: &Path, version: &str) -> Result<(), Strin
         }
     }
     Ok(())
+}
+
+/// The menu entry of an installed app. The archive's own entry is kept (file
+/// types, categories, translations); only the program and icon get full paths,
+/// so it works without ~/.local/bin on the PATH.
+#[cfg(target_os = "linux")]
+fn menu_entry(packaged: Option<&str>, name: &str, tagline: &str, bin: &Path, icon: &str) -> String {
+    let Some(p) = packaged.filter(|p| p.trim_start().starts_with("[Desktop Entry]")) else {
+        return format!(
+            "[Desktop Entry]\nType=Application\nName={name}\nComment={tagline}\nExec=\"{}\" %F\n{icon}Terminal=false\nCategories=AudioVideo;\nX-Stagehand=1\n",
+            bin.display()
+        );
+    };
+    let mut out = String::new();
+    let mut args = String::new();
+    for line in p.lines() {
+        if let Some(exec) = line.strip_prefix("Exec=") {
+            // "lantern %f" -> " %f"
+            args = exec.find(' ').map(|i| exec[i..].to_string()).unwrap_or_default();
+        } else if !line.starts_with("Icon=") && !line.starts_with("X-Stagehand=") {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out.push_str(&format!("Exec=\"{}\"{args}\n{icon}X-Stagehand=1\n", bin.display()));
+    out
 }
 
 // --------------------------------------------------------------------------
@@ -629,6 +651,20 @@ mod tests {
         .unwrap();
         assert_eq!(bundle_version(&app).as_deref(), Some("0.4.0"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn menu_entry_keeps_the_packaged_file_types() {
+        let packaged = "[Desktop Entry]\nName=Lantern\nExec=lantern %f\nIcon=lantern\nMimeType=application/pdf;\n";
+        let e = menu_entry(Some(packaged), "Lantern", "t", Path::new("/a b/lantern"), "Icon=/a b/icon.png\n");
+        assert!(e.contains("MimeType=application/pdf;\n"));
+        assert!(e.contains("Exec=\"/a b/lantern\" %f\n"));
+        assert!(e.contains("Icon=/a b/icon.png\n") && !e.contains("Icon=lantern"));
+        assert!(e.ends_with("X-Stagehand=1\n"));
+        // No usable packaged entry: a plain one.
+        let e = menu_entry(Some("junk"), "Lantern", "t", Path::new("/x/lantern"), "");
+        assert!(e.starts_with("[Desktop Entry]") && e.contains("Name=Lantern"));
     }
 
     #[cfg(target_os = "linux")]

@@ -35,7 +35,8 @@ that is not built in needs an `icon_url` (PNG).
 
 ## Build and install
 
-Linux:
+Linux (no sudo: it goes into `~/.local/share/stagehand/apps`, the folder Stagehand installs all apps
+into; run it again to update, `./install.sh --uninstall` removes it):
 
     ./install.sh
 

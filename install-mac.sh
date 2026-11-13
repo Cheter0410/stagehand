@@ -12,32 +12,20 @@ set -euo pipefail
 cd "$(dirname "$0")"
 # shellcheck source=scripts/ui.sh
 . scripts/ui.sh
+# shellcheck source=scripts/setup.sh
+. scripts/setup.sh
 [ "$(uname -s)" = "Darwin" ] || ui_fail "Dieses Skript ist für macOS (Linux: ./install.sh)."
+setup_no_root
 [ -n "${SM_PULLED:-}" ] || ui_header "Stagehand" "Installieren / Aktualisieren"
 
 if ! xcode-select -p >/dev/null 2>&1; then
   xcode-select --install || true
   ui_fail "Im Fenster, das sich geöffnet hat, auf 'Installieren' klicken und warten. Dann nochmal: bash install-mac.sh"
 fi
-if [ -z "${SM_PULLED:-}" ] && [ -d .git ]; then
-  if git diff --quiet && git diff --cached --quiet; then
-    git fetch -q 2>/dev/null || true
-    if [ -n "$(git rev-list HEAD..@{u} 2>/dev/null)" ]; then
-      ui_run "Neuesten Stand holen" git pull -q --ff-only
-      SM_PULLED=1 exec bash "$(pwd)/$(basename "$0")" "$@"
-    fi
-    ui_ok "Quellcode ist aktuell"
-  else
-    ui_warn "Lokale Änderungen – baue den Stand, der hier liegt"
-  fi
-else
-  ui_ok "Quellcode ist aktuell"
+if [ -z "${SM_PULLED:-}" ]; then
+  if setup_pull; then SM_PULLED=1 exec bash "$(pwd)/$(basename "$0")" "$@"; fi
 fi
-if [ ! -x "$HOME/.cargo/bin/rustup" ] && ! command -v rustup >/dev/null 2>&1; then
-  ui_run "Rust installieren (einmalig)" sh -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal"
-fi
-# shellcheck disable=SC1091
-[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+setup_rust
 
 ui_section "Bauen"
 ./packaging/macos/build-dmg.sh
@@ -48,23 +36,13 @@ ui_section "Installieren"
 [ -n "${NO_INSTALL:-}" ] && { ui_ok "Installer: $DMG"; ui_done; exit 0; }
 STAMP=dist/.made/installed-app
 # All show tools share one folder (as Stagehand installs them).
-APPDIR=/Applications/Stagehand
+APPDIR=$(mac_app_dir)
 WANT=$(cat "dist/.made/$(basename "$DMG")" 2>/dev/null || echo none)
 if [ -d "$APPDIR/Stagehand.app" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$WANT" ]; then
-  ui_skip "In Programme/Stagehand" "Stagehand $V ist schon installiert"
+  ui_skip "In $APPDIR" "Stagehand $V ist schon installiert"
 else
-  put() {
-    pkill -x stagehand 2>/dev/null || true
-    MNT=$(mktemp -d)
-    hdiutil attach -nobrowse -readonly -mountpoint "$MNT" "$DMG" >/dev/null
-    mkdir -p "$APPDIR"
-    rm -rf "$APPDIR/Stagehand.app" "/Applications/Stagehand.app"
-    ditto "$MNT/Stagehand.app" "$APPDIR/Stagehand.app"
-    hdiutil detach "$MNT" -quiet >/dev/null 2>&1 || true
-    rmdir "$MNT" 2>/dev/null || true
-    xattr -dr com.apple.quarantine "$APPDIR/Stagehand.app" 2>/dev/null || true
-  }
-  ui_run "In Programme/Stagehand" put
+  pkill -x stagehand 2>/dev/null || true
+  ui_run "In $APPDIR" mac_app_put "$DMG" Stagehand.app "$APPDIR"
   printf '%s' "$WANT" > "$STAMP"
 fi
 
